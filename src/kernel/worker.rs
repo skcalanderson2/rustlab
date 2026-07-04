@@ -25,13 +25,14 @@ pub enum KernelCommand {
     Shutdown,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum KernelEvent {
     IoPub(JupyterMessage),
     ShellReply(JupyterMessage),
     Exited(Option<i32>),
 }
 
+#[derive(Clone)]
 pub struct KernelHandle {
     pub commands: mpsc::Sender<KernelCommand>,
     pub session_id: String,
@@ -62,6 +63,8 @@ pub async fn launch(spec: KernelspecDir) -> Result<(KernelHandle, mpsc::Receiver
 
     let kernel_name = spec.kernel_name.clone();
     let mut cmd = spec.command(&connection_path, None, None)?;
+    // If the app dies without a graceful shutdown, take the kernel with us.
+    cmd.kill_on_drop(true);
     let child = cmd
         .spawn()
         .with_context(|| format!("spawning kernel process for `{kernel_name}`"))?;
