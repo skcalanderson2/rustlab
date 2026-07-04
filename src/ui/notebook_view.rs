@@ -15,6 +15,31 @@ pub enum Event {
     Save,
     Interrupt,
     Restart,
+    SelectCell(usize),
+    AddCellAbove,
+    AddCellBelow,
+    DeleteCell,
+    MoveCellUp,
+    MoveCellDown,
+    SetCellType(CellTypeChoice),
+    RunAll,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellTypeChoice {
+    Code,
+    Markdown,
+    Raw,
+}
+
+impl std::fmt::Display for CellTypeChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CellTypeChoice::Code => "Code",
+            CellTypeChoice::Markdown => "Markdown",
+            CellTypeChoice::Raw => "Raw",
+        })
+    }
 }
 
 pub struct KernelIndicator<'a> {
@@ -26,6 +51,7 @@ pub fn view<'a>(
     doc: &'a NotebookDoc,
     language: &'a str,
     kernel: KernelIndicator<'a>,
+    selected: usize,
 ) -> Element<'a, Event> {
     let status = match kernel.busy {
         Some(true) => format!("{} ●", kernel.label),
@@ -33,25 +59,68 @@ pub fn view<'a>(
         None => kernel.label.to_string(),
     };
 
+    let selected_type = doc.cells.get(selected).map(|c| match c.kind {
+        CellKind::Code => CellTypeChoice::Code,
+        CellKind::Markdown { .. } => CellTypeChoice::Markdown,
+        CellKind::Raw => CellTypeChoice::Raw,
+    });
+
+    let tool = |label: &'static str, event: Event| {
+        button(text(label).size(13)).padding(6).on_press(event)
+    };
+
     let toolbar = row![
-        button(text("💾").size(13)).padding(6).on_press(Event::Save),
-        button(text("⏹").size(13)).padding(6).on_press(Event::Interrupt),
-        button(text("⟳").size(13)).padding(6).on_press(Event::Restart),
+        tool("💾", Event::Save),
+        tool("➕", Event::AddCellBelow),
+        tool("✂", Event::DeleteCell),
+        tool("↑", Event::MoveCellUp),
+        tool("↓", Event::MoveCellDown),
+        tool("▶▶", Event::RunAll),
+        tool("⏹", Event::Interrupt),
+        tool("⟳", Event::Restart),
+        iced::widget::pick_list(
+            [
+                CellTypeChoice::Code,
+                CellTypeChoice::Markdown,
+                CellTypeChoice::Raw,
+            ],
+            selected_type,
+            Event::SetCellType,
+        )
+        .text_size(13)
+        .padding(6),
         container(text(status).size(13)).padding(6),
     ]
     .spacing(6)
     .padding(6);
 
-    let cells = column(
-        doc.cells
-            .iter()
-            .enumerate()
-            .map(|(i, cell)| view_cell(i, cell, language)),
-    )
-    .spacing(12)
+    let cells = column(doc.cells.iter().enumerate().map(|(i, cell)| {
+        let body = view_cell(i, cell, language);
+        let styled = container(body).width(Fill).padding(4).style(if i == selected {
+            selected_cell_style
+        } else {
+            container::transparent
+        });
+        iced::widget::mouse_area(styled)
+            .on_press(Event::SelectCell(i))
+            .into()
+    }))
+    .spacing(8)
     .padding(16);
 
     column![toolbar, scrollable(cells).width(Fill).height(Fill)].into()
+}
+
+fn selected_cell_style(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        border: iced::Border {
+            color: palette.primary.base.color,
+            width: 1.0,
+            radius: 3.0.into(),
+        },
+        ..container::Style::default()
+    }
 }
 
 fn view_cell<'a>(index: usize, cell: &'a CellState, language: &'a str) -> Element<'a, Event> {

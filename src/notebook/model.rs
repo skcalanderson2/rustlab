@@ -296,6 +296,40 @@ mod tests {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellKindTag {
+    Code,
+    Markdown,
+    Raw,
+}
+
+/// Change a cell's type in place, preserving its source. Outputs and the
+/// execution count only make sense for code cells and are dropped otherwise.
+pub fn set_cell_kind(cell: &mut CellState, tag: CellKindTag) {
+    let already = matches!(
+        (&cell.kind, tag),
+        (CellKind::Code, CellKindTag::Code)
+            | (CellKind::Markdown { .. }, CellKindTag::Markdown)
+            | (CellKind::Raw, CellKindTag::Raw)
+    );
+    if already {
+        return;
+    }
+    cell.kind = match tag {
+        CellKindTag::Code => CellKind::Code,
+        CellKindTag::Markdown => CellKind::Markdown {
+            rendered: markdown::Content::parse(&cell.source.text()),
+            editing: true,
+        },
+        CellKindTag::Raw => CellKind::Raw,
+    };
+    if !matches!(tag, CellKindTag::Code) {
+        cell.outputs.clear();
+        cell.execution_count = None;
+        cell.running = false;
+    }
+}
+
 pub fn new_code_cell() -> CellState {
     CellState {
         id: v4::CellId::from(uuid::Uuid::new_v4()),

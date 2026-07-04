@@ -18,7 +18,8 @@ use crate::kernel::discovery::{self, KernelspecDir};
 use crate::kernel::worker::{self, KernelCommand, KernelEvent, KernelHandle};
 use crate::notebook::model::{self, CellKind, CellOutput, NotebookDoc};
 use crate::output::render;
-use crate::ui::{launcher, notebook_view, sidebar};
+use crate::ui::{console_view, launcher, notebook_view, sidebar};
+use std::collections::VecDeque;
 
 pub fn run(path: Option<PathBuf>) -> iced::Result {
     iced::application(move || App::boot(path.clone()), App::update, App::view)
@@ -42,6 +43,8 @@ pub struct App {
     tabs: HashMap<TabId, Tab>,
     next_tab_id: TabId,
     status_line: String,
+    /// True after a lone `d` in command mode; the next `d` deletes the cell.
+    pending_delete: bool,
 }
 
 struct PaneTabs {
@@ -52,6 +55,7 @@ struct PaneTabs {
 enum Tab {
     Launcher,
     Notebook(NotebookTab),
+    Console(ConsoleTab),
 }
 
 struct NotebookTab {
@@ -62,6 +66,32 @@ struct NotebookTab {
     /// syntect token for highlighting cell sources.
     language: String,
     kernel_label: String,
+    selected: usize,
+    /// Cells queued by Run All, executed one at a time.
+    queue: VecDeque<usize>,
+}
+
+struct ConsoleTab {
+    entries: Vec<console_view::ConsoleEntry>,
+    input: text_editor::Content,
+    kernel: KernelState,
+    pending: HashMap<String, usize>,
+    language: String,
+    kernel_label: String,
+}
+
+impl NotebookTab {
+    fn new(doc: NotebookDoc, language: String) -> Self {
+        NotebookTab {
+            doc,
+            kernel: KernelState::Launching,
+            pending: HashMap::new(),
+            language,
+            kernel_label: "starting...".to_string(),
+            selected: 0,
+            queue: VecDeque::new(),
+        }
+    }
 }
 
 enum KernelState {
@@ -76,7 +106,9 @@ pub enum Message {
     Sidebar(sidebar::Event),
     Launcher(launcher::Event),
     Notebook(TabId, notebook_view::Event),
+    Console(TabId, console_view::Event),
     Kernel(TabId, KernelMsg),
+    CommandKey(String),
     SelectTab(pane_grid::Pane, usize),
     CloseTab(pane_grid::Pane, usize),
     NewLauncher(pane_grid::Pane),
@@ -123,6 +155,7 @@ impl App {
             tabs,
             next_tab_id: 1,
             status_line: String::new(),
+            pending_delete: false,
         };
 
         let mut tasks = vec![
@@ -158,10 +191,9 @@ impl App {
             Message::Sidebar(event) => self.on_sidebar(event),
             Message::Launcher(event) => self.on_launcher(event),
             Message::Notebook(tab_id, event) => self.on_notebook(tab_id, event),
-            Message::Kernel(tab_id, msg) => {
-                self.on_kernel_msg(tab_id, msg);
-                Task::none()
-            }
+            Message::Console(tab_id, event) => self.on_console(tab_id, event),
+            Message::Kernel(tab_id, msg) => self.on_kernel_msg(tab_id, msg),
+            Message::CommandKey(key) => self.on_command_key(&key),
             Message::SelectTab(pane, index) => {
                 if let Some(state) = self.panes.get_mut(pane) {
                     state.active = index.min(state.tabs.len().saturating_sub(1));
@@ -265,10 +297,101 @@ impl App {
     fn on_launcher(&mut self, event: launcher::Event) -> Task<Message> {
         match event {
             launcher::Event::NewNotebook(kernel_name) => self.new_notebook(kernel_name),
-            launcher::Event::NewConsole(_) => {
-                self.status_line = "consoles arrive in a later milestone".to_string();
+            launcher::Event::NewConsole(kernel_name) => {
+                let language = self
+                    .specs
+                    .iter()
+                    .find(|s| s.kernel_name == kernel_name)
+                    .map(|s| language_token_for(&s.kernelspec.language))
+                    .unwrap_or_else(|| "python".to_string());
+                let id = self.alloc_tab(Tab::Console(ConsoleTab {
+                    entries: Vec::new(),
+                    input: text_editor::Content::new(),
+                    kernel: KernelState::Launching,
+                    pending: HashMap::new(),
+                    language,
+                    kernel_label: "starting...".to_string(),
+                }));
+                self.add_tab_to_focused(id);
+                Task::stream(kernel_events(Some(kernel_name)))
+                    .map(move |msg| Message::Kernel(id, msg))
+            }
+        }
+    }
+
+    fn on_console(&mut self, tab_id: TabId, event: console_view::Event) -> Task<Message> {
+        let Some(Tab::Console(console)) = self.tabs.get_mut(&tab_id) else {
+            return Task::none();
+        };
+        match event {
+            console_view::Event::InputAction(action) => {
+                console.input.perform(action);
                 Task::none()
             }
+            console_view::Event::LinkClicked(uri) => {
+                let _ = open::that(uri.to_string());
+                Task::none()
+            }
+            console_view::Event::Submit => {
+                let code = console.input.text();
+                if code.trim().is_empty() {
+                    return Task::none();
+                }
+                let KernelState::Ready { handle, .. } = &console.kernel else {
+                    self.status_line = "kernel not ready".to_string();
+                    return Task::none();
+                };
+                let exec: JupyterMessage = ExecuteRequest::new(code.clone()).into();
+                console
+                    .pending
+                    .insert(exec.header.msg_id.clone(), console.entries.len());
+                console.entries.push(console_view::ConsoleEntry {
+                    execution_count: None,
+                    source: code.trim_end().to_string(),
+                    outputs: Vec::new(),
+                    running: true,
+                });
+                console.input = text_editor::Content::new();
+                let commands = handle.commands.clone();
+                Task::future(async move {
+                    let _ = commands.send(KernelCommand::Shell(exec)).await;
+                })
+                .discard()
+            }
+        }
+    }
+
+    fn on_command_key(&mut self, key: &str) -> Task<Message> {
+        let Some(tab_id) = self.active_tab_id(self.focused_pane) else {
+            return Task::none();
+        };
+        let Some(Tab::Notebook(nb)) = self.tabs.get_mut(&tab_id) else {
+            return Task::none();
+        };
+        let was_pending_delete = std::mem::take(&mut self.pending_delete);
+        let event = match key {
+            "a" => Some(notebook_view::Event::AddCellAbove),
+            "b" => Some(notebook_view::Event::AddCellBelow),
+            "m" => Some(notebook_view::Event::SetCellType(
+                notebook_view::CellTypeChoice::Markdown,
+            )),
+            "y" => Some(notebook_view::Event::SetCellType(
+                notebook_view::CellTypeChoice::Code,
+            )),
+            "d" => {
+                if was_pending_delete {
+                    Some(notebook_view::Event::DeleteCell)
+                } else {
+                    self.pending_delete = true;
+                    None
+                }
+            }
+            _ => None,
+        };
+        let _ = nb;
+        match event {
+            Some(event) => self.on_notebook(tab_id, event),
+            None => Task::none(),
         }
     }
 
@@ -314,6 +437,7 @@ impl App {
                 }
                 nb.kernel = KernelState::Launching;
                 nb.pending.clear();
+                nb.queue.clear();
                 for cell in &mut nb.doc.cells {
                     cell.running = false;
                 }
@@ -321,48 +445,143 @@ impl App {
                 Task::stream(kernel_events(preferred))
                     .map(move |msg| Message::Kernel(tab_id, msg))
             }
+            notebook_view::Event::SelectCell(index) => {
+                nb.selected = index.min(nb.doc.cells.len().saturating_sub(1));
+                Task::none()
+            }
+            notebook_view::Event::AddCellAbove => {
+                let at = nb.selected.min(nb.doc.cells.len());
+                nb.doc.cells.insert(at, model::new_code_cell());
+                nb.selected = at;
+                nb.doc.dirty = true;
+                Task::none()
+            }
+            notebook_view::Event::AddCellBelow => {
+                let at = (nb.selected + 1).min(nb.doc.cells.len());
+                nb.doc.cells.insert(at, model::new_code_cell());
+                nb.selected = at;
+                nb.doc.dirty = true;
+                Task::none()
+            }
+            notebook_view::Event::DeleteCell => {
+                if nb.doc.cells.len() > 1 && nb.selected < nb.doc.cells.len() {
+                    nb.doc.cells.remove(nb.selected);
+                    nb.selected = nb.selected.min(nb.doc.cells.len() - 1);
+                    nb.doc.dirty = true;
+                }
+                Task::none()
+            }
+            notebook_view::Event::MoveCellUp => {
+                if nb.selected > 0 && nb.selected < nb.doc.cells.len() {
+                    nb.doc.cells.swap(nb.selected, nb.selected - 1);
+                    nb.selected -= 1;
+                    nb.doc.dirty = true;
+                }
+                Task::none()
+            }
+            notebook_view::Event::MoveCellDown => {
+                if nb.selected + 1 < nb.doc.cells.len() {
+                    nb.doc.cells.swap(nb.selected, nb.selected + 1);
+                    nb.selected += 1;
+                    nb.doc.dirty = true;
+                }
+                Task::none()
+            }
+            notebook_view::Event::SetCellType(choice) => {
+                if let Some(cell) = nb.doc.cells.get_mut(nb.selected) {
+                    model::set_cell_kind(cell, match choice {
+                        notebook_view::CellTypeChoice::Code => model::CellKindTag::Code,
+                        notebook_view::CellTypeChoice::Markdown => model::CellKindTag::Markdown,
+                        notebook_view::CellTypeChoice::Raw => model::CellKindTag::Raw,
+                    });
+                    nb.doc.dirty = true;
+                }
+                Task::none()
+            }
+            notebook_view::Event::RunAll => {
+                nb.queue = nb
+                    .doc
+                    .cells
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| c.is_code())
+                    .map(|(i, _)| i)
+                    .collect();
+                // Render all markdown cells too, like JupyterLab's Run All.
+                for cell in &mut nb.doc.cells {
+                    if let CellKind::Markdown { rendered, editing } = &mut cell.kind {
+                        *rendered =
+                            iced::widget::markdown::Content::parse(&cell.source.text());
+                        *editing = false;
+                    }
+                }
+                match nb.queue.pop_front() {
+                    Some(first) => nb.run_cell(first, &mut self.status_line),
+                    None => Task::none(),
+                }
+            }
         }
     }
 
-    fn on_kernel_msg(&mut self, tab_id: TabId, msg: KernelMsg) {
-        let Some(Tab::Notebook(nb)) = self.tabs.get_mut(&tab_id) else {
-            return;
-        };
-        match msg {
-            KernelMsg::Ready(handle) => {
-                nb.kernel_label = handle
-                    .connection_info
-                    .kernel_name
-                    .clone()
-                    .unwrap_or_else(|| "kernel".to_string());
-                nb.kernel = KernelState::Ready {
-                    handle,
-                    busy: false,
-                };
-            }
-            KernelMsg::Failed(e) => {
-                nb.kernel = KernelState::Dead { reason: e };
-            }
-            KernelMsg::Event(KernelEvent::Exited(code)) => {
-                // A restart replaces the state with Launching first; only a
-                // Ready/Dead kernel exiting is terminal.
-                if !matches!(nb.kernel, KernelState::Launching) {
-                    nb.kernel = KernelState::Dead {
-                        reason: format!("exited (code {code:?})"),
-                    };
-                }
-            }
-            KernelMsg::Event(KernelEvent::ShellReply(reply)) => {
-                if let JupyterMessageContent::ExecuteReply(r) = &reply.content {
-                    let parent = reply.parent_header.as_ref().map(|h| h.msg_id.clone());
-                    if let Some(index) = parent.and_then(|id| nb.pending.get(&id).copied()) {
-                        if let Some(cell) = nb.doc.cells.get_mut(index) {
-                            cell.execution_count = Some(r.execution_count.value() as i32);
+    fn on_kernel_msg(&mut self, tab_id: TabId, msg: KernelMsg) -> Task<Message> {
+        match self.tabs.get_mut(&tab_id) {
+            Some(Tab::Notebook(nb)) => {
+                match msg {
+                    KernelMsg::Ready(handle) => {
+                        nb.kernel_label = handle
+                            .connection_info
+                            .kernel_name
+                            .clone()
+                            .unwrap_or_else(|| "kernel".to_string());
+                        nb.kernel = KernelState::Ready {
+                            handle,
+                            busy: false,
+                        };
+                    }
+                    KernelMsg::Failed(e) => {
+                        nb.kernel = KernelState::Dead { reason: e };
+                    }
+                    KernelMsg::Event(KernelEvent::Exited(code)) => {
+                        // A restart replaces the state with Launching first;
+                        // only a Ready/Dead kernel exiting is terminal.
+                        if !matches!(nb.kernel, KernelState::Launching) {
+                            nb.kernel = KernelState::Dead {
+                                reason: format!("exited (code {code:?})"),
+                            };
+                        }
+                    }
+                    KernelMsg::Event(KernelEvent::ShellReply(reply)) => {
+                        if let JupyterMessageContent::ExecuteReply(r) = &reply.content {
+                            let parent =
+                                reply.parent_header.as_ref().map(|h| h.msg_id.clone());
+                            if let Some(index) =
+                                parent.and_then(|id| nb.pending.get(&id).copied())
+                            {
+                                if let Some(cell) = nb.doc.cells.get_mut(index) {
+                                    cell.execution_count =
+                                        Some(r.execution_count.value() as i32);
+                                }
+                            }
+                        }
+                    }
+                    KernelMsg::Event(KernelEvent::IoPub(msg)) => {
+                        nb.on_iopub(msg);
+                        // Drive the Run All queue: dispatch the next cell once
+                        // the previous execution fully completed.
+                        if nb.pending.is_empty() {
+                            if let Some(next) = nb.queue.pop_front() {
+                                return nb.run_cell(next, &mut self.status_line);
+                            }
                         }
                     }
                 }
+                Task::none()
             }
-            KernelMsg::Event(KernelEvent::IoPub(msg)) => nb.on_iopub(msg),
+            Some(Tab::Console(console)) => {
+                console.on_kernel_msg(msg);
+                Task::none()
+            }
+            _ => Task::none(),
         }
     }
 
@@ -405,13 +624,7 @@ impl App {
             Ok(doc) => {
                 let preferred = doc.metadata.kernelspec.as_ref().map(|k| k.name.clone());
                 let language = language_token(&doc);
-                let id = self.alloc_tab(Tab::Notebook(NotebookTab {
-                    doc,
-                    kernel: KernelState::Launching,
-                    pending: HashMap::new(),
-                    language,
-                    kernel_label: "starting...".to_string(),
-                }));
+                let id = self.alloc_tab(Tab::Notebook(NotebookTab::new(doc, language)));
                 self.add_tab_to_focused(id);
                 Task::stream(kernel_events(preferred)).map(move |msg| Message::Kernel(id, msg))
             }
@@ -441,13 +654,7 @@ impl App {
             dirty: true,
         };
         let language = language_token(&doc);
-        let id = self.alloc_tab(Tab::Notebook(NotebookTab {
-            doc,
-            kernel: KernelState::Launching,
-            pending: HashMap::new(),
-            language,
-            kernel_label: "starting...".to_string(),
-        }));
+        let id = self.alloc_tab(Tab::Notebook(NotebookTab::new(doc, language)));
         self.add_tab_to_focused(id);
         Task::stream(kernel_events(Some(kernel_name))).map(move |msg| Message::Kernel(id, msg))
     }
@@ -478,10 +685,18 @@ impl App {
         }
         let empty = state.tabs.is_empty();
 
-        if let Some(Tab::Notebook(nb)) = self.tabs.remove(&id) {
-            if let KernelState::Ready { handle, .. } = &nb.kernel {
-                let _ = handle.commands.try_send(KernelCommand::Shutdown);
+        match self.tabs.remove(&id) {
+            Some(Tab::Notebook(nb)) => {
+                if let KernelState::Ready { handle, .. } = &nb.kernel {
+                    let _ = handle.commands.try_send(KernelCommand::Shutdown);
+                }
             }
+            Some(Tab::Console(console)) => {
+                if let KernelState::Ready { handle, .. } = &console.kernel {
+                    let _ = handle.commands.try_send(KernelCommand::Shutdown);
+                }
+            }
+            _ => {}
         }
 
         if empty {
@@ -544,7 +759,7 @@ impl App {
     // ------------------------------------------------------------------
 
     fn subscription(&self) -> Subscription<Message> {
-        iced::event::listen_with(|event, _status, _window| {
+        iced::event::listen_with(|event, status, _window| {
             if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                 key: iced::keyboard::Key::Character(c),
                 modifiers,
@@ -553,6 +768,15 @@ impl App {
             {
                 if modifiers.command() && c.as_str() == "s" {
                     return Some(Message::SaveActive);
+                }
+                // Command-mode keys only apply when no widget (e.g. a focused
+                // cell editor) consumed the key press.
+                if status == iced::event::Status::Ignored
+                    && !modifiers.command()
+                    && !modifiers.control()
+                    && !modifiers.alt()
+                {
+                    return Some(Message::CommandKey(c.to_string()));
                 }
             }
             None
@@ -592,8 +816,25 @@ impl App {
                             _ => None,
                         },
                     };
-                    notebook_view::view(&nb.doc, &nb.language, indicator)
+                    notebook_view::view(&nb.doc, &nb.language, indicator, nb.selected)
                         .map(move |e| Message::Notebook(id, e))
+                }
+                Some((id, Tab::Console(console))) => {
+                    let (label, busy) = match &console.kernel {
+                        KernelState::Launching => ("starting...", None),
+                        KernelState::Ready { busy, .. } => {
+                            (console.kernel_label.as_str(), Some(*busy))
+                        }
+                        KernelState::Dead { .. } => ("dead", None),
+                    };
+                    console_view::view(
+                        &console.entries,
+                        &console.input,
+                        &console.language,
+                        label,
+                        busy,
+                    )
+                    .map(move |e| Message::Console(id, e))
                 }
                 None => text("").into(),
             };
@@ -627,6 +868,7 @@ impl App {
         for (i, id) in state.tabs.iter().enumerate() {
             let title = match self.tabs.get(id) {
                 Some(Tab::Launcher) => "Launcher".to_string(),
+                Some(Tab::Console(console)) => format!("Console ({})", console.kernel_label),
                 Some(Tab::Notebook(nb)) => {
                     let name = nb
                         .doc
@@ -775,6 +1017,113 @@ impl NotebookTab {
     }
 }
 
+impl ConsoleTab {
+    fn on_kernel_msg(&mut self, msg: KernelMsg) {
+        match msg {
+            KernelMsg::Ready(handle) => {
+                self.kernel_label = handle
+                    .connection_info
+                    .kernel_name
+                    .clone()
+                    .unwrap_or_else(|| "kernel".to_string());
+                self.kernel = KernelState::Ready {
+                    handle,
+                    busy: false,
+                };
+            }
+            KernelMsg::Failed(e) => {
+                self.kernel = KernelState::Dead { reason: e };
+            }
+            KernelMsg::Event(KernelEvent::Exited(code)) => {
+                if !matches!(self.kernel, KernelState::Launching) {
+                    self.kernel = KernelState::Dead {
+                        reason: format!("exited (code {code:?})"),
+                    };
+                }
+            }
+            KernelMsg::Event(KernelEvent::ShellReply(reply)) => {
+                if let JupyterMessageContent::ExecuteReply(r) = &reply.content {
+                    let parent = reply.parent_header.as_ref().map(|h| h.msg_id.clone());
+                    if let Some(index) = parent.and_then(|id| self.pending.get(&id).copied()) {
+                        if let Some(entry) = self.entries.get_mut(index) {
+                            entry.execution_count = Some(r.execution_count.value() as i32);
+                        }
+                    }
+                }
+            }
+            KernelMsg::Event(KernelEvent::IoPub(msg)) => {
+                let parent_id = msg.parent_header.as_ref().map(|h| h.msg_id.clone());
+                let entry_index =
+                    parent_id.as_ref().and_then(|id| self.pending.get(id)).copied();
+
+                if let JupyterMessageContent::Status(s) = &msg.content {
+                    if let KernelState::Ready { busy, .. } = &mut self.kernel {
+                        *busy = s.execution_state == ExecutionState::Busy;
+                    }
+                    if s.execution_state == ExecutionState::Idle {
+                        if let (Some(index), Some(id)) = (entry_index, parent_id.as_ref()) {
+                            self.pending.remove(id);
+                            if let Some(entry) = self.entries.get_mut(index) {
+                                entry.running = false;
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                let Some(entry) = entry_index.and_then(|i| self.entries.get_mut(i)) else {
+                    return;
+                };
+                match msg.content {
+                    JupyterMessageContent::StreamContent(s) => {
+                        let name = match s.name {
+                            jupyter_protocol::Stdio::Stdout => "stdout",
+                            jupyter_protocol::Stdio::Stderr => "stderr",
+                        };
+                        if let Some(CellOutput::Stream { name: last, text }) =
+                            entry.outputs.last_mut()
+                        {
+                            if last == name {
+                                text.push_str(&s.text);
+                                return;
+                            }
+                        }
+                        entry.outputs.push(CellOutput::Stream {
+                            name: name.to_string(),
+                            text: s.text,
+                        });
+                    }
+                    JupyterMessageContent::ExecuteInput(input) => {
+                        entry.execution_count = Some(input.execution_count.value() as i32);
+                    }
+                    JupyterMessageContent::ExecuteResult(r) => {
+                        entry.outputs.push(CellOutput::Data {
+                            rendered: render::prepare(&r.data),
+                            media: r.data,
+                            execution_count: Some(r.execution_count),
+                        });
+                    }
+                    JupyterMessageContent::DisplayData(d) => {
+                        entry.outputs.push(CellOutput::Data {
+                            rendered: render::prepare(&d.data),
+                            media: d.data,
+                            execution_count: None,
+                        });
+                    }
+                    JupyterMessageContent::ErrorOutput(e) => {
+                        entry.outputs.push(CellOutput::Error {
+                            ename: e.ename,
+                            evalue: e.evalue,
+                            traceback: e.traceback,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 /// Map a notebook's language to a syntect token iced's highlighter accepts.
 fn language_token(doc: &NotebookDoc) -> String {
     let language = doc
@@ -789,6 +1138,10 @@ fn language_token(doc: &NotebookDoc) -> String {
                 .and_then(|k| k.language.clone())
         })
         .unwrap_or_else(|| "python".to_string());
+    language_token_for(&language)
+}
+
+fn language_token_for(language: &str) -> String {
     match language.to_lowercase().as_str() {
         "python" => "python",
         // Mojo is a Python superset; the default syntax set has no Mojo grammar.
