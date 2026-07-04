@@ -2,6 +2,7 @@ mod app;
 mod kernel;
 mod notebook;
 mod output;
+mod ui;
 
 use anyhow::Result;
 
