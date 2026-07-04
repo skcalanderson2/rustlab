@@ -26,6 +26,7 @@ pub fn view<'a>(
     language: &'a str,
     kernel_label: &'a str,
     busy: Option<bool>,
+    dark: bool,
 ) -> Element<'a, Event> {
     let status = match busy {
         Some(true) => format!("{kernel_label} ●"),
@@ -33,7 +34,7 @@ pub fn view<'a>(
         None => kernel_label.to_string(),
     };
 
-    let scrollback = column(entries.iter().map(view_entry))
+    let scrollback = column(entries.iter().map(|e| view_entry(e, dark)))
         .spacing(12)
         .padding(16)
         .width(Fill);
@@ -43,7 +44,14 @@ pub fn view<'a>(
         .placeholder("Shift+Enter to run")
         .font(Font::MONOSPACE)
         .size(14)
-        .highlight(language, iced::highlighter::Theme::InspiredGitHub)
+        .highlight(
+            language,
+            if dark {
+                iced::highlighter::Theme::SolarizedDark
+            } else {
+                iced::highlighter::Theme::InspiredGitHub
+            },
+        )
         .on_action(Event::InputAction)
         .key_binding(|key_press| {
             use iced::keyboard::key::{Key, Named};
@@ -61,7 +69,7 @@ pub fn view<'a>(
     .into()
 }
 
-fn view_entry(entry: &ConsoleEntry) -> Element<'_, Event> {
+fn view_entry(entry: &ConsoleEntry, dark: bool) -> Element<'_, Event> {
     let label = if entry.running {
         "In [*]:".to_string()
     } else {
@@ -86,7 +94,7 @@ fn view_entry(entry: &ConsoleEntry) -> Element<'_, Event> {
                 entry
                     .outputs
                     .iter()
-                    .map(|o| render::view_output(o).map(Event::LinkClicked)),
+                    .map(|o| render::view_output(o, dark).map(Event::LinkClicked)),
             )
             .spacing(4)
             .padding([0, 78]),

@@ -18,7 +18,7 @@ use crate::kernel::discovery::{self, KernelspecDir};
 use crate::kernel::worker::{self, KernelCommand, KernelEvent, KernelHandle};
 use crate::notebook::model::{self, CellKind, CellOutput, NotebookDoc};
 use crate::output::render;
-use crate::ui::{console_view, launcher, notebook_view, sidebar};
+use crate::ui::{console_view, launcher, menu, notebook_view, sidebar};
 use std::collections::VecDeque;
 
 pub fn run(path: Option<PathBuf>) -> iced::Result {
@@ -45,6 +45,9 @@ pub struct App {
     status_line: String,
     /// True after a lone `d` in command mode; the next `d` deletes the cell.
     pending_delete: bool,
+    open_menu: Option<menu::MenuId>,
+    theme: Theme,
+    show_sidebar: bool,
 }
 
 struct PaneTabs {
@@ -109,6 +112,8 @@ pub enum Message {
     Console(TabId, console_view::Event),
     Kernel(TabId, KernelMsg),
     CommandKey(String),
+    Menu(menu::Event),
+    FileChosen(Option<PathBuf>),
     SelectTab(pane_grid::Pane, usize),
     CloseTab(pane_grid::Pane, usize),
     NewLauncher(pane_grid::Pane),
@@ -156,6 +161,9 @@ impl App {
             next_tab_id: 1,
             status_line: String::new(),
             pending_delete: false,
+            open_menu: None,
+            theme: Theme::Light,
+            show_sidebar: true,
         };
 
         let mut tasks = vec![
@@ -171,7 +179,11 @@ impl App {
     }
 
     fn theme(&self) -> Theme {
-        Theme::Light
+        self.theme.clone()
+    }
+
+    fn is_dark(&self) -> bool {
+        matches!(self.theme, Theme::Dark)
     }
 
     fn title(&self) -> String {
@@ -194,6 +206,24 @@ impl App {
             Message::Console(tab_id, event) => self.on_console(tab_id, event),
             Message::Kernel(tab_id, msg) => self.on_kernel_msg(tab_id, msg),
             Message::CommandKey(key) => self.on_command_key(&key),
+            Message::Menu(menu::Event::Toggle(id)) => {
+                self.open_menu = if self.open_menu == Some(id) {
+                    None
+                } else {
+                    Some(id)
+                };
+                Task::none()
+            }
+            Message::Menu(menu::Event::Close) => {
+                self.open_menu = None;
+                Task::none()
+            }
+            Message::Menu(menu::Event::Action(action)) => {
+                self.open_menu = None;
+                self.on_menu_action(action)
+            }
+            Message::FileChosen(Some(path)) => self.open_notebook(path),
+            Message::FileChosen(None) => Task::none(),
             Message::SelectTab(pane, index) => {
                 if let Some(state) = self.panes.get_mut(pane) {
                     state.active = index.min(state.tabs.len().saturating_sub(1));
@@ -357,6 +387,128 @@ impl App {
                     let _ = commands.send(KernelCommand::Shell(exec)).await;
                 })
                 .discard()
+            }
+        }
+    }
+
+    fn on_menu_action(&mut self, action: menu::MenuAction) -> Task<Message> {
+        use menu::MenuAction as A;
+        use notebook_view::Event as NbEvent;
+
+        let focused_tab = self.active_tab_id(self.focused_pane);
+        let to_notebook = |app: &mut Self, event: NbEvent| match focused_tab {
+            Some(id) => app.on_notebook(id, event),
+            None => Task::none(),
+        };
+
+        match action {
+            A::NewNotebook => {
+                let name = self
+                    .specs
+                    .iter()
+                    .find(|s| s.kernel_name == "python3")
+                    .or_else(|| self.specs.first())
+                    .map(|s| s.kernel_name.clone());
+                match name {
+                    Some(name) => self.new_notebook(name),
+                    None => {
+                        self.status_line = "no kernels installed".to_string();
+                        Task::none()
+                    }
+                }
+            }
+            A::NewLauncherTab => self.update(Message::NewLauncher(self.focused_pane)),
+            A::OpenFile => {
+                let cwd = self.browser.cwd.clone();
+                Task::perform(
+                    async move {
+                        rfd::AsyncFileDialog::new()
+                            .add_filter("Jupyter Notebook", &["ipynb"])
+                            .set_directory(cwd)
+                            .pick_file()
+                            .await
+                            .map(|f| f.path().to_path_buf())
+                    },
+                    Message::FileChosen,
+                )
+            }
+            A::Save => match focused_tab {
+                Some(id) => self.save_tab(id),
+                None => Task::none(),
+            },
+            A::SaveAs => {
+                if let Some(Tab::Notebook(nb)) =
+                    focused_tab.and_then(|id| self.tabs.get_mut(&id))
+                {
+                    nb.doc.path = None;
+                }
+                match focused_tab {
+                    Some(id) => self.save_tab(id),
+                    None => Task::none(),
+                }
+            }
+            A::CloseTab => {
+                let pane = self.focused_pane;
+                let active = self.panes.get(pane).map(|s| s.active).unwrap_or(0);
+                self.close_tab(pane, active)
+            }
+            A::AddCellAbove => to_notebook(self, NbEvent::AddCellAbove),
+            A::AddCellBelow => to_notebook(self, NbEvent::AddCellBelow),
+            A::DeleteCell => to_notebook(self, NbEvent::DeleteCell),
+            A::MoveCellUp => to_notebook(self, NbEvent::MoveCellUp),
+            A::MoveCellDown => to_notebook(self, NbEvent::MoveCellDown),
+            A::CellToCode => to_notebook(
+                self,
+                NbEvent::SetCellType(notebook_view::CellTypeChoice::Code),
+            ),
+            A::CellToMarkdown => to_notebook(
+                self,
+                NbEvent::SetCellType(notebook_view::CellTypeChoice::Markdown),
+            ),
+            A::RunCell => {
+                let index = match focused_tab.and_then(|id| self.tabs.get(&id)) {
+                    Some(Tab::Notebook(nb)) => nb.selected,
+                    _ => return Task::none(),
+                };
+                to_notebook(self, NbEvent::RunCell(index))
+            }
+            A::RunAll => to_notebook(self, NbEvent::RunAll),
+            A::Interrupt => to_notebook(self, NbEvent::Interrupt),
+            A::Restart => to_notebook(self, NbEvent::Restart),
+            A::ToggleSidebar => {
+                self.show_sidebar = !self.show_sidebar;
+                Task::none()
+            }
+            A::LightTheme => {
+                self.theme = Theme::Light;
+                Task::none()
+            }
+            A::DarkTheme => {
+                self.theme = Theme::Dark;
+                Task::none()
+            }
+            A::SplitPane => self.update(Message::SplitPane(self.focused_pane)),
+            A::NextTab | A::PreviousTab => {
+                if let Some(state) = self.panes.get_mut(self.focused_pane) {
+                    let len = state.tabs.len();
+                    if len > 0 {
+                        state.active = if matches!(action, A::NextTab) {
+                            (state.active + 1) % len
+                        } else {
+                            (state.active + len - 1) % len
+                        };
+                    }
+                }
+                Task::none()
+            }
+            A::JupyterDocs => {
+                let _ = open::that("https://jupyter.org");
+                Task::none()
+            }
+            A::About => {
+                self.status_line =
+                    "RustLab — a native Jupyter client in Rust + iced".to_string();
+                Task::none()
             }
         }
     }
@@ -784,14 +936,7 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let menu_bar = container(
-            row(["File", "Edit", "View", "Run", "Kernel", "Tabs", "Settings", "Help"]
-                .iter()
-                .map(|label| container(text(*label).size(13)).padding([4, 10]).into()))
-            .spacing(2),
-        )
-        .width(Fill)
-        .style(container::bordered_box);
+        let menu_bar = menu::bar(self.open_menu).map(Message::Menu);
 
         let panes = pane_grid(&self.panes, |pane, state, _maximized| {
             let tab_strip = self.view_tab_strip(pane, state);
@@ -816,7 +961,7 @@ impl App {
                             _ => None,
                         },
                     };
-                    notebook_view::view(&nb.doc, &nb.language, indicator, nb.selected)
+                    notebook_view::view(&nb.doc, &nb.language, indicator, nb.selected, self.is_dark())
                         .map(move |e| Message::Notebook(id, e))
                 }
                 Some((id, Tab::Console(console))) => {
@@ -833,6 +978,7 @@ impl App {
                         &console.language,
                         label,
                         busy,
+                        self.is_dark(),
                     )
                     .map(move |e| Message::Console(id, e))
                 }
@@ -847,16 +993,25 @@ impl App {
         .on_resize(8, Message::PaneResized)
         .on_drag(Message::PaneDragged);
 
-        let workspace = row![
-            self.browser.view().map(Message::Sidebar),
-            container(panes).width(Fill).height(Fill).padding(4),
-        ];
+        let mut workspace = row![];
+        if self.show_sidebar {
+            workspace = workspace.push(self.browser.view().map(Message::Sidebar));
+        }
+        workspace = workspace.push(container(panes).width(Fill).height(Fill).padding(4));
 
         let status_bar = container(text(&self.status_line).size(12))
             .width(Fill)
             .padding([2, 10]);
 
-        column![menu_bar, workspace, status_bar].into()
+        let base: Element<'_, Message> = column![menu_bar, workspace, status_bar].into();
+
+        match self.open_menu {
+            Some(open) => iced::widget::stack![base, menu::dropdown(open).map(Message::Menu)]
+                .width(Fill)
+                .height(Fill)
+                .into(),
+            None => base,
+        }
     }
 
     fn view_tab_strip<'a>(

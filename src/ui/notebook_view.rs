@@ -52,6 +52,7 @@ pub fn view<'a>(
     language: &'a str,
     kernel: KernelIndicator<'a>,
     selected: usize,
+    dark: bool,
 ) -> Element<'a, Event> {
     let status = match kernel.busy {
         Some(true) => format!("{} ●", kernel.label),
@@ -95,7 +96,7 @@ pub fn view<'a>(
     .padding(6);
 
     let cells = column(doc.cells.iter().enumerate().map(|(i, cell)| {
-        let body = view_cell(i, cell, language);
+        let body = view_cell(i, cell, language, dark);
         let styled = container(body).width(Fill).padding(4).style(if i == selected {
             selected_cell_style
         } else {
@@ -123,7 +124,12 @@ fn selected_cell_style(theme: &Theme) -> container::Style {
     }
 }
 
-fn view_cell<'a>(index: usize, cell: &'a CellState, language: &'a str) -> Element<'a, Event> {
+fn view_cell<'a>(
+    index: usize,
+    cell: &'a CellState,
+    language: &'a str,
+    dark: bool,
+) -> Element<'a, Event> {
     match &cell.kind {
         CellKind::Code => {
             let gutter_label = if cell.running {
@@ -141,14 +147,14 @@ fn view_cell<'a>(index: usize, cell: &'a CellState, language: &'a str) -> Elemen
             .spacing(4)
             .width(70);
 
-            let editor = code_editor(index, cell, language);
+            let editor = code_editor(index, cell, language, dark);
 
             let mut body = column![row![gutter, editor].spacing(8)].spacing(8);
             if !cell.outputs.is_empty() {
                 let outputs = column(
                     cell.outputs
                         .iter()
-                        .map(|o| render::view_output(o).map(Event::LinkClicked)),
+                        .map(|o| render::view_output(o, dark).map(Event::LinkClicked)),
                 )
                 .spacing(4)
                 .padding([0, 78]);
@@ -158,7 +164,7 @@ fn view_cell<'a>(index: usize, cell: &'a CellState, language: &'a str) -> Elemen
         }
         CellKind::Markdown { rendered, editing } => {
             if *editing {
-                container(code_editor(index, cell, "markdown"))
+                container(code_editor(index, cell, "markdown", dark))
                     .padding([0, 78])
                     .width(Fill)
                     .into()
@@ -167,7 +173,10 @@ fn view_cell<'a>(index: usize, cell: &'a CellState, language: &'a str) -> Elemen
                     container(
                         markdown::view(
                             rendered.items(),
-                            markdown::Settings::with_text_size(14, Theme::Light),
+                            markdown::Settings::with_text_size(
+                                14,
+                                if dark { Theme::Dark } else { Theme::Light },
+                            ),
                         )
                         .map(Event::LinkClicked),
                     )
@@ -184,12 +193,24 @@ fn view_cell<'a>(index: usize, cell: &'a CellState, language: &'a str) -> Elemen
     }
 }
 
-fn code_editor<'a>(index: usize, cell: &'a CellState, language: &'a str) -> Element<'a, Event> {
+fn code_editor<'a>(
+    index: usize,
+    cell: &'a CellState,
+    language: &'a str,
+    dark: bool,
+) -> Element<'a, Event> {
     text_editor(&cell.source)
         .placeholder("...")
         .font(Font::MONOSPACE)
         .size(14)
-        .highlight(language, iced::highlighter::Theme::InspiredGitHub)
+        .highlight(
+            language,
+            if dark {
+                iced::highlighter::Theme::SolarizedDark
+            } else {
+                iced::highlighter::Theme::InspiredGitHub
+            },
+        )
         .on_action(move |action| Event::CellAction(index, action))
         .key_binding(move |key_press| {
             use iced::keyboard::key::{Key, Named};

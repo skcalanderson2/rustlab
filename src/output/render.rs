@@ -58,10 +58,10 @@ fn decode_base64(data: &str) -> Option<Vec<u8>> {
     base64::engine::general_purpose::STANDARD.decode(cleaned).ok()
 }
 
-pub fn view_output<'a>(output: &'a CellOutput) -> Element<'a, markdown::Uri> {
+pub fn view_output<'a>(output: &'a CellOutput, dark: bool) -> Element<'a, markdown::Uri> {
     match output {
         CellOutput::Stream { text, .. } => ansi_text(text),
-        CellOutput::Data { rendered, .. } => view_rendered(rendered),
+        CellOutput::Data { rendered, .. } => view_rendered(rendered, dark),
         CellOutput::Error {
             traceback,
             ename,
@@ -76,7 +76,7 @@ pub fn view_output<'a>(output: &'a CellOutput) -> Element<'a, markdown::Uri> {
     }
 }
 
-fn view_rendered<'a>(rendered: &'a Rendered) -> Element<'a, markdown::Uri> {
+fn view_rendered<'a>(rendered: &'a Rendered, dark: bool) -> Element<'a, markdown::Uri> {
     match rendered {
         Rendered::Image(handle) => image(handle.clone()).into(),
         Rendered::Svg(handle) => svg(handle.clone())
@@ -85,7 +85,10 @@ fn view_rendered<'a>(rendered: &'a Rendered) -> Element<'a, markdown::Uri> {
             .into(),
         Rendered::Markdown(content) => markdown::view(
             content.items(),
-            markdown::Settings::with_text_size(14, iced::Theme::Light),
+            markdown::Settings::with_text_size(
+                14,
+                if dark { iced::Theme::Dark } else { iced::Theme::Light },
+            ),
         ),
         Rendered::Text(s) => ansi_text(s),
         Rendered::Unsupported(kind) => text(format!("<unsupported {kind}>"))
