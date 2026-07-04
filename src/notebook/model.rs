@@ -69,12 +69,11 @@ impl CellState {
     /// Append a stream chunk, merging with a trailing stream output of the
     /// same name the way JupyterLab does.
     pub fn push_stream(&mut self, name: &str, chunk: &str) {
-        if let Some(CellOutput::Stream { name: last, text }) = self.outputs.last_mut() {
-            if last == name {
+        if let Some(CellOutput::Stream { name: last, text }) = self.outputs.last_mut()
+            && last == name {
                 text.push_str(chunk);
                 return;
             }
-        }
         self.outputs.push(CellOutput::Stream {
             name: name.to_string(),
             text: chunk.to_string(),

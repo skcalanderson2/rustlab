@@ -34,6 +34,7 @@ pub const MENUS: [(MenuId, &str); 8] = [
 pub enum MenuAction {
     NewNotebook,
     NewLauncherTab,
+    NewTerminal,
     OpenFile,
     Save,
     SaveAs,
@@ -72,6 +73,7 @@ fn items(menu: MenuId) -> Vec<(&'static str, MenuAction)> {
         MenuId::File => vec![
             ("New Notebook", NewNotebook),
             ("New Launcher", NewLauncherTab),
+            ("New Terminal", NewTerminal),
             ("Open...", OpenFile),
             ("Save", Save),
             ("Save As...", SaveAs),

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
-use iced::{Element, Fill, Font};
+use iced::{Element, Fill};
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -95,15 +95,7 @@ impl FileBrowser {
                 } else {
                     "📄"
                 };
-                let label = row![
-                    text(icon).size(13),
-                    text(&entry.name).size(13).font(if entry.is_dir {
-                        Font::DEFAULT
-                    } else {
-                        Font::DEFAULT
-                    }),
-                ]
-                .spacing(6);
+                let label = row![text(icon).size(13), text(&entry.name).size(13)].spacing(6);
 
                 let target = if entry.is_dir {
                     Event::Navigate(entry.path.clone())

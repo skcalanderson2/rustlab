@@ -48,6 +48,8 @@ pub struct App {
     open_menu: Option<menu::MenuId>,
     theme: Theme,
     show_sidebar: bool,
+    /// Tab whose close was blocked by unsaved changes; closing it again discards.
+    confirm_close: Option<TabId>,
 }
 
 struct PaneTabs {
@@ -59,6 +61,7 @@ enum Tab {
     Launcher,
     Notebook(NotebookTab),
     Console(ConsoleTab),
+    Terminal(iced_term::Terminal),
 }
 
 struct NotebookTab {
@@ -114,6 +117,7 @@ pub enum Message {
     CommandKey(String),
     Menu(menu::Event),
     FileChosen(Option<PathBuf>),
+    Terminal(iced_term::Event),
     SelectTab(pane_grid::Pane, usize),
     CloseTab(pane_grid::Pane, usize),
     NewLauncher(pane_grid::Pane),
@@ -164,6 +168,7 @@ impl App {
             open_menu: None,
             theme: Theme::Light,
             show_sidebar: true,
+            confirm_close: None,
         };
 
         let mut tasks = vec![
@@ -224,6 +229,20 @@ impl App {
             }
             Message::FileChosen(Some(path)) => self.open_notebook(path),
             Message::FileChosen(None) => Task::none(),
+            Message::Terminal(iced_term::Event::BackendCall(term_id, cmd)) => {
+                let entry = self.tabs.iter_mut().find_map(|(tab_id, tab)| match tab {
+                    Tab::Terminal(term) if term.id == term_id => Some((*tab_id, term)),
+                    _ => None,
+                });
+                if let Some((tab_id, term)) = entry {
+                    let action =
+                        term.handle(iced_term::Command::ProxyToBackend(cmd));
+                    if action == iced_term::actions::Action::Shutdown {
+                        return self.close_tab_by_id(tab_id);
+                    }
+                }
+                Task::none()
+            }
             Message::SelectTab(pane, index) => {
                 if let Some(state) = self.panes.get_mut(pane) {
                     state.active = index.min(state.tabs.len().saturating_sub(1));
@@ -327,6 +346,28 @@ impl App {
     fn on_launcher(&mut self, event: launcher::Event) -> Task<Message> {
         match event {
             launcher::Event::NewNotebook(kernel_name) => self.new_notebook(kernel_name),
+            launcher::Event::NewTerminal => {
+                let id = self.next_tab_id;
+                let settings = iced_term::settings::Settings {
+                    backend: iced_term::settings::BackendSettings {
+                        program: std::env::var("SHELL")
+                            .unwrap_or_else(|_| "/bin/zsh".to_string()),
+                        working_directory: Some(self.browser.cwd.clone()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                match iced_term::Terminal::new(id, settings) {
+                    Ok(term) => {
+                        let id = self.alloc_tab(Tab::Terminal(term));
+                        self.add_tab_to_focused(id);
+                    }
+                    Err(e) => {
+                        self.status_line = format!("failed to start terminal: {e}");
+                    }
+                }
+                Task::none()
+            }
             launcher::Event::NewConsole(kernel_name) => {
                 let language = self
                     .specs
@@ -359,7 +400,7 @@ impl App {
                 Task::none()
             }
             console_view::Event::LinkClicked(uri) => {
-                let _ = open::that(uri.to_string());
+                let _ = open::that(&uri);
                 Task::none()
             }
             console_view::Event::Submit => {
@@ -418,6 +459,7 @@ impl App {
                 }
             }
             A::NewLauncherTab => self.update(Message::NewLauncher(self.focused_pane)),
+            A::NewTerminal => self.on_launcher(launcher::Event::NewTerminal),
             A::OpenFile => {
                 let cwd = self.browser.cwd.clone();
                 Task::perform(
@@ -564,15 +606,14 @@ impl App {
             }
             notebook_view::Event::RunCell(index) => nb.run_cell(index, &mut self.status_line),
             notebook_view::Event::EditMarkdown(index) => {
-                if let Some(cell) = nb.doc.cells.get_mut(index) {
-                    if let CellKind::Markdown { editing, .. } = &mut cell.kind {
+                if let Some(cell) = nb.doc.cells.get_mut(index)
+                    && let CellKind::Markdown { editing, .. } = &mut cell.kind {
                         *editing = true;
                     }
-                }
                 Task::none()
             }
             notebook_view::Event::LinkClicked(uri) => {
-                let _ = open::that(uri.to_string());
+                let _ = open::that(&uri);
                 Task::none()
             }
             notebook_view::Event::Save => self.save_tab(tab_id),
@@ -708,23 +749,20 @@ impl App {
                                 reply.parent_header.as_ref().map(|h| h.msg_id.clone());
                             if let Some(index) =
                                 parent.and_then(|id| nb.pending.get(&id).copied())
-                            {
-                                if let Some(cell) = nb.doc.cells.get_mut(index) {
+                                && let Some(cell) = nb.doc.cells.get_mut(index) {
                                     cell.execution_count =
                                         Some(r.execution_count.value() as i32);
                                 }
-                            }
                         }
                     }
                     KernelMsg::Event(KernelEvent::IoPub(msg)) => {
                         nb.on_iopub(msg);
                         // Drive the Run All queue: dispatch the next cell once
                         // the previous execution fully completed.
-                        if nb.pending.is_empty() {
-                            if let Some(next) = nb.queue.pop_front() {
+                        if nb.pending.is_empty()
+                            && let Some(next) = nb.queue.pop_front() {
                                 return nb.run_cell(next, &mut self.status_line);
                             }
-                        }
                     }
                 }
                 Task::none()
@@ -814,23 +852,37 @@ impl App {
     fn focus_tab(&mut self, id: TabId) {
         let panes: Vec<pane_grid::Pane> = self.panes.iter().map(|(p, _)| *p).collect();
         for pane in panes {
-            if let Some(state) = self.panes.get_mut(pane) {
-                if let Some(pos) = state.tabs.iter().position(|t| *t == id) {
+            if let Some(state) = self.panes.get_mut(pane)
+                && let Some(pos) = state.tabs.iter().position(|t| *t == id) {
                     state.active = pos;
                     self.focused_pane = pane;
                     return;
                 }
-            }
         }
     }
 
     fn close_tab(&mut self, pane: pane_grid::Pane, index: usize) -> Task<Message> {
-        let Some(state) = self.panes.get_mut(pane) else {
+        let Some(state) = self.panes.get(pane) else {
             return Task::none();
         };
         if index >= state.tabs.len() {
             return Task::none();
         }
+
+        // Unsaved notebooks need a second close to confirm discarding.
+        let id_to_close = state.tabs[index];
+        if let Some(Tab::Notebook(nb)) = self.tabs.get(&id_to_close)
+            && nb.doc.dirty && self.confirm_close != Some(id_to_close) {
+                self.confirm_close = Some(id_to_close);
+                self.status_line =
+                    "unsaved changes — close the tab again to discard them".to_string();
+                return Task::none();
+            }
+        self.confirm_close = None;
+
+        let Some(state) = self.panes.get_mut(pane) else {
+            return Task::none();
+        };
         let id = state.tabs.remove(index);
         if state.active >= state.tabs.len() {
             state.active = state.tabs.len().saturating_sub(1);
@@ -910,8 +962,26 @@ impl App {
     // View
     // ------------------------------------------------------------------
 
+    fn close_tab_by_id(&mut self, tab_id: TabId) -> Task<Message> {
+        let location = self.panes.iter().find_map(|(pane, state)| {
+            state
+                .tabs
+                .iter()
+                .position(|t| *t == tab_id)
+                .map(|index| (*pane, index))
+        });
+        match location {
+            Some((pane, index)) => self.close_tab(pane, index),
+            None => Task::none(),
+        }
+    }
+
     fn subscription(&self) -> Subscription<Message> {
-        iced::event::listen_with(|event, status, _window| {
+        let terminals = self.tabs.values().filter_map(|tab| match tab {
+            Tab::Terminal(term) => Some(term.subscription().map(Message::Terminal)),
+            _ => None,
+        });
+        let keyboard = iced::event::listen_with(|event, status, _window| {
             if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                 key: iced::keyboard::Key::Character(c),
                 modifiers,
@@ -932,7 +1002,8 @@ impl App {
                 }
             }
             None
-        })
+        });
+        Subscription::batch(std::iter::once(keyboard).chain(terminals))
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -963,6 +1034,9 @@ impl App {
                     };
                     notebook_view::view(&nb.doc, &nb.language, indicator, nb.selected, self.is_dark())
                         .map(move |e| Message::Notebook(id, e))
+                }
+                Some((_, Tab::Terminal(term))) => {
+                    iced_term::TerminalView::show(term).map(Message::Terminal)
                 }
                 Some((id, Tab::Console(console))) => {
                     let (label, busy) = match &console.kernel {
@@ -1023,6 +1097,7 @@ impl App {
         for (i, id) in state.tabs.iter().enumerate() {
             let title = match self.tabs.get(id) {
                 Some(Tab::Launcher) => "Launcher".to_string(),
+                Some(Tab::Terminal(_)) => "Terminal".to_string(),
                 Some(Tab::Console(console)) => format!("Console ({})", console.kernel_label),
                 Some(Tab::Notebook(nb)) => {
                     let name = nb
@@ -1078,13 +1153,12 @@ impl App {
 impl NotebookTab {
     fn run_cell(&mut self, index: usize, status_line: &mut String) -> Task<Message> {
         // "Running" a markdown cell renders it, like in JupyterLab.
-        if let Some(cell) = self.doc.cells.get_mut(index) {
-            if let CellKind::Markdown { rendered, editing } = &mut cell.kind {
+        if let Some(cell) = self.doc.cells.get_mut(index)
+            && let CellKind::Markdown { rendered, editing } = &mut cell.kind {
                 *rendered = iced::widget::markdown::Content::parse(&cell.source.text());
                 *editing = false;
                 return Task::none();
             }
-        }
 
         let KernelState::Ready { handle, .. } = &self.kernel else {
             *status_line = "kernel not ready".to_string();
@@ -1119,14 +1193,13 @@ impl NotebookTab {
             if let KernelState::Ready { busy, .. } = &mut self.kernel {
                 *busy = s.execution_state == ExecutionState::Busy;
             }
-            if s.execution_state == ExecutionState::Idle {
-                if let (Some(index), Some(id)) = (cell_index, parent_id.as_ref()) {
+            if s.execution_state == ExecutionState::Idle
+                && let (Some(index), Some(id)) = (cell_index, parent_id.as_ref()) {
                     self.pending.remove(id);
                     if let Some(cell) = self.doc.cells.get_mut(index) {
                         cell.running = false;
                     }
                 }
-            }
             return;
         }
 
@@ -1199,11 +1272,10 @@ impl ConsoleTab {
             KernelMsg::Event(KernelEvent::ShellReply(reply)) => {
                 if let JupyterMessageContent::ExecuteReply(r) = &reply.content {
                     let parent = reply.parent_header.as_ref().map(|h| h.msg_id.clone());
-                    if let Some(index) = parent.and_then(|id| self.pending.get(&id).copied()) {
-                        if let Some(entry) = self.entries.get_mut(index) {
+                    if let Some(index) = parent.and_then(|id| self.pending.get(&id).copied())
+                        && let Some(entry) = self.entries.get_mut(index) {
                             entry.execution_count = Some(r.execution_count.value() as i32);
                         }
-                    }
                 }
             }
             KernelMsg::Event(KernelEvent::IoPub(msg)) => {
@@ -1215,14 +1287,13 @@ impl ConsoleTab {
                     if let KernelState::Ready { busy, .. } = &mut self.kernel {
                         *busy = s.execution_state == ExecutionState::Busy;
                     }
-                    if s.execution_state == ExecutionState::Idle {
-                        if let (Some(index), Some(id)) = (entry_index, parent_id.as_ref()) {
+                    if s.execution_state == ExecutionState::Idle
+                        && let (Some(index), Some(id)) = (entry_index, parent_id.as_ref()) {
                             self.pending.remove(id);
                             if let Some(entry) = self.entries.get_mut(index) {
                                 entry.running = false;
                             }
                         }
-                    }
                     return;
                 }
 
@@ -1237,12 +1308,10 @@ impl ConsoleTab {
                         };
                         if let Some(CellOutput::Stream { name: last, text }) =
                             entry.outputs.last_mut()
-                        {
-                            if last == name {
+                            && last == name {
                                 text.push_str(&s.text);
                                 return;
                             }
-                        }
                         entry.outputs.push(CellOutput::Stream {
                             name: name.to_string(),
                             text: s.text,

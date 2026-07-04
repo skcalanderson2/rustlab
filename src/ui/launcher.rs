@@ -8,6 +8,7 @@ use jupyter_zmq_client::kernelspec::KernelspecDir;
 pub enum Event {
     NewNotebook(String),
     NewConsole(String),
+    NewTerminal,
 }
 
 pub fn view(specs: &[KernelspecDir]) -> Element<'_, Event> {
@@ -40,10 +41,23 @@ pub fn view(specs: &[KernelspecDir]) -> Element<'_, Event> {
         column![text(title).size(18), tiles].spacing(12)
     };
 
+    let terminal_tile = button(
+        column![text("$_").size(28), text("Terminal").size(12).center()]
+            .spacing(8)
+            .align_x(iced::Center)
+            .width(Fill),
+    )
+    .style(button::secondary)
+    .width(130)
+    .height(110)
+    .padding(12)
+    .on_press(Event::NewTerminal);
+
     let content = column![
         text("Launcher").size(24),
         section("Notebook", Event::NewNotebook),
         section("Console", Event::NewConsole),
+        column![text("Other").size(18), terminal_tile].spacing(12),
     ]
     .spacing(24)
     .padding(32)
