@@ -8,6 +8,8 @@ use iced::widget::{markdown, text_editor};
 use jupyter_protocol::{ExecutionCount, Media};
 use nbformat::v4;
 
+use crate::output::render::{self, Rendered};
+
 pub struct NotebookDoc {
     pub path: Option<PathBuf>,
     pub metadata: v4::Metadata,
@@ -18,7 +20,10 @@ pub struct NotebookDoc {
 
 pub enum CellKind {
     Code,
-    Markdown { rendered: markdown::Content },
+    Markdown {
+        rendered: markdown::Content,
+        editing: bool,
+    },
     Raw,
 }
 
@@ -33,7 +38,7 @@ pub struct CellState {
 }
 
 /// A cell output, unified across live kernel messages and saved notebooks.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum CellOutput {
     Stream {
         name: String,
@@ -43,6 +48,7 @@ pub enum CellOutput {
     Data {
         media: Media,
         execution_count: Option<ExecutionCount>,
+        rendered: Rendered,
     },
     Error {
         ename: String,
@@ -137,6 +143,7 @@ fn cell_from_nbformat(cell: v4::Cell) -> CellState {
                 id,
                 kind: CellKind::Markdown {
                     rendered: markdown::Content::parse(&text),
+                    editing: false,
                 },
                 source: text_editor::Content::with_text(&text),
                 outputs: Vec::new(),
@@ -189,10 +196,12 @@ fn output_from_nbformat(output: v4::Output) -> CellOutput {
     match output {
         v4::Output::Stream { name, text } => CellOutput::Stream { name, text: text.0 },
         v4::Output::DisplayData(d) => CellOutput::Data {
+            rendered: render::prepare(&d.data),
             media: d.data,
             execution_count: None,
         },
         v4::Output::ExecuteResult(r) => CellOutput::Data {
+            rendered: render::prepare(&r.data),
             media: r.data,
             execution_count: Some(r.execution_count),
         },
@@ -213,6 +222,7 @@ fn output_to_nbformat(output: &CellOutput) -> v4::Output {
         CellOutput::Data {
             media,
             execution_count: Some(count),
+            ..
         } => v4::Output::ExecuteResult(v4::ExecuteResult {
             execution_count: *count,
             data: media.clone(),
@@ -221,6 +231,7 @@ fn output_to_nbformat(output: &CellOutput) -> v4::Output {
         CellOutput::Data {
             media,
             execution_count: None,
+            ..
         } => v4::Output::DisplayData(v4::DisplayData {
             data: media.clone(),
             metadata: serde_json::Map::new(),
@@ -243,6 +254,46 @@ fn split_lines(text: &str) -> Vec<String> {
         return Vec::new();
     }
     text.split_inclusive('\n').map(str::to_string).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixture_round_trips_without_data_loss() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/smoke.ipynb"
+        ));
+        let doc = load(path).expect("fixture should load");
+        assert!(doc.cells.len() >= 5);
+        assert!(matches!(doc.cells[0].kind, CellKind::Markdown { .. }));
+
+        let json = save(&doc).expect("serialize");
+        let reparsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let original: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(reparsed["cells"].as_array().unwrap().len(),
+                   original["cells"].as_array().unwrap().len());
+        // Source text survives the line-split round trip exactly.
+        for (a, b) in reparsed["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(original["cells"].as_array().unwrap())
+        {
+            let join = |v: &serde_json::Value| -> String {
+                v["source"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|s| s.as_str().unwrap())
+                    .collect()
+            };
+            assert_eq!(join(a), join(b));
+        }
+    }
 }
 
 pub fn new_code_cell() -> CellState {

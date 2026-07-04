@@ -44,6 +44,7 @@ enum KernelState {
 pub enum Message {
     CellAction(usize, text_editor::Action),
     RunCell(usize),
+    EditMarkdown(usize),
     Kernel(KernelMsg),
     Save,
     Saved(Result<(), String>),
@@ -131,15 +132,20 @@ impl App {
                         cell.source.perform(action);
                         if is_edit {
                             doc.dirty = true;
-                            if let CellKind::Markdown { rendered } = &mut cell.kind {
-                                *rendered = markdown::Content::parse(&cell.source.text());
-                            }
                         }
                     }
                 }
                 Task::none()
             }
             Message::RunCell(index) => self.run_cell(index),
+            Message::EditMarkdown(index) => {
+                if let Some(cell) = self.doc.as_mut().and_then(|d| d.cells.get_mut(index)) {
+                    if let CellKind::Markdown { editing, .. } = &mut cell.kind {
+                        *editing = true;
+                    }
+                }
+                Task::none()
+            }
             Message::Kernel(msg) => self.on_kernel_msg(msg),
             Message::Save => self.save(),
             Message::Saved(Ok(())) => {
@@ -158,6 +164,15 @@ impl App {
     }
 
     fn run_cell(&mut self, index: usize) -> Task<Message> {
+        // "Running" a markdown cell renders it, like in JupyterLab.
+        if let Some(cell) = self.doc.as_mut().and_then(|d| d.cells.get_mut(index)) {
+            if let CellKind::Markdown { rendered, editing } = &mut cell.kind {
+                *rendered = markdown::Content::parse(&cell.source.text());
+                *editing = false;
+                return Task::none();
+            }
+        }
+
         let KernelState::Ready { handle, .. } = &self.kernel else {
             self.status_line = "kernel not ready".to_string();
             return Task::none();
@@ -282,12 +297,14 @@ impl App {
             }
             JupyterMessageContent::ExecuteResult(r) => {
                 cell.outputs.push(CellOutput::Data {
+                    rendered: render::prepare(&r.data),
                     media: r.data,
                     execution_count: Some(r.execution_count),
                 });
             }
             JupyterMessageContent::DisplayData(d) => {
                 cell.outputs.push(CellOutput::Data {
+                    rendered: render::prepare(&d.data),
                     media: d.data,
                     execution_count: None,
                 });
@@ -398,23 +415,53 @@ impl App {
 
                 let mut body = column![row![gutter, editor].spacing(8)].spacing(8);
                 if !cell.outputs.is_empty() {
-                    let outputs = column(cell.outputs.iter().map(render::view_output))
-                        .spacing(4)
-                        .padding([0, 78]);
+                    let outputs = column(
+                        cell.outputs
+                            .iter()
+                            .map(|o| render::view_output(o).map(Message::LinkClicked)),
+                    )
+                    .spacing(4)
+                    .padding([0, 78]);
                     body = body.push(outputs);
                 }
                 body.into()
             }
-            CellKind::Markdown { rendered } => container(
-                markdown::view(
-                    rendered.items(),
-                    markdown::Settings::with_text_size(14, Theme::Light),
-                )
-                    .map(Message::LinkClicked),
-            )
-            .padding([0, 78])
-            .width(Fill)
-            .into(),
+            CellKind::Markdown { rendered, editing } => {
+                if *editing {
+                    let editor = text_editor(&cell.source)
+                        .placeholder("Type markdown...")
+                        .font(Font::MONOSPACE)
+                        .size(14)
+                        .highlight("markdown", iced::highlighter::Theme::InspiredGitHub)
+                        .on_action(move |action| Message::CellAction(index, action))
+                        .key_binding(move |key_press| {
+                            use iced::keyboard::key::{Key, Named};
+                            if matches!(key_press.key, Key::Named(Named::Enter))
+                                && key_press.modifiers.shift()
+                            {
+                                return Some(text_editor::Binding::Custom(Message::RunCell(
+                                    index,
+                                )));
+                            }
+                            text_editor::Binding::from_key_press(key_press)
+                        });
+                    container(editor).padding([0, 78]).width(Fill).into()
+                } else {
+                    iced::widget::mouse_area(
+                        container(
+                            markdown::view(
+                                rendered.items(),
+                                markdown::Settings::with_text_size(14, Theme::Light),
+                            )
+                            .map(Message::LinkClicked),
+                        )
+                        .padding([0, 78])
+                        .width(Fill),
+                    )
+                    .on_double_click(Message::EditMarkdown(index))
+                    .into()
+                }
+            }
             CellKind::Raw => container(
                 text(cell.source_text()).font(Font::MONOSPACE).size(13),
             )
