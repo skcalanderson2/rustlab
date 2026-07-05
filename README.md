@@ -1,3 +1,5 @@
+<img src="packaging/macos/RustLab-1024.png" width="96" align="right" alt="RustLab icon">
+
 # RustLab
 
 A native Jupyter Notebook desktop application written in Rust, using the
@@ -8,6 +10,18 @@ installed kernelspec works: Python (ipykernel), Julia, Mojo, R, Rust (evcxr), â€
 The UI follows the standard JupyterLab layout: menu bar, file-browser
 sidebar, and a tabbed workspace with split panes, opening on a Launcher page
 with Notebook/Console tiles per installed kernel.
+
+## Screenshots
+
+The Launcher â€” one Notebook and Console tile per discovered kernel
+(Python, Julia, Mojo shown), plus terminal tabs:
+
+![Launcher with kernel tiles](docs/launcher.png)
+
+A real notebook (JupyterLab's Intro.ipynb) with rendered markdown cells,
+syntax-highlighted code, and live kernel execution:
+
+![Notebook with rendered markdown and code cells](docs/notebook.png)
 
 ## Features
 
