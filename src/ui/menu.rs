@@ -63,6 +63,8 @@ pub enum MenuAction {
 #[derive(Debug, Clone)]
 pub enum Event {
     Toggle(MenuId),
+    /// Pointer entered a menu-bar button; switches the open menu, macOS-style.
+    Hover(MenuId),
     Action(MenuAction),
     Close,
 }
@@ -108,12 +110,15 @@ pub fn bar(open: Option<MenuId>) -> Element<'static, Event> {
     container(
         row(MENUS.iter().map(|(id, label)| {
             let is_open = open == Some(*id);
-            button(text(*label).size(13).center())
-                .width(MENU_BUTTON_WIDTH)
-                .padding([5, 0])
-                .style(if is_open { button::secondary } else { button::text })
-                .on_press(Event::Toggle(*id))
-                .into()
+            iced::widget::mouse_area(
+                button(text(*label).size(13).center())
+                    .width(MENU_BUTTON_WIDTH)
+                    .padding([5, 0])
+                    .style(if is_open { button::secondary } else { button::text })
+                    .on_press(Event::Toggle(*id)),
+            )
+            .on_enter(Event::Hover(*id))
+            .into()
         }))
         .spacing(0),
     )
@@ -163,17 +168,19 @@ pub fn dropdown(menu: MenuId) -> Element<'static, Event> {
     )
     .on_press(Event::Close);
 
-    iced::widget::stack![
-        backdrop,
-        column![
-            Space::new().height(MENU_BAR_HEIGHT),
+    // The overlay starts below the menu bar so the bar itself stays
+    // interactive while a menu is open (hover-to-switch, click-to-toggle).
+    column![
+        Space::new().height(MENU_BAR_HEIGHT),
+        iced::widget::stack![
+            backdrop,
             row![
                 Space::new().width(index as f32 * MENU_BUTTON_WIDTH),
                 panel
             ],
-        ],
+        ]
+        .width(Fill)
+        .height(Fill),
     ]
-    .width(Fill)
-    .height(Fill)
     .into()
 }

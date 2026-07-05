@@ -219,6 +219,14 @@ impl App {
                 };
                 Task::none()
             }
+            Message::Menu(menu::Event::Hover(id)) => {
+                // macOS behavior: once a menu is open, pointing at another
+                // menu-bar item switches to it without a click.
+                if self.open_menu.is_some() && self.open_menu != Some(id) {
+                    self.open_menu = Some(id);
+                }
+                Task::none()
+            }
             Message::Menu(menu::Event::Close) => {
                 self.open_menu = None;
                 Task::none()
