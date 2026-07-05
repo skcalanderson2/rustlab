@@ -62,8 +62,14 @@ impl FileBrowser {
 
     pub fn view(&self) -> Element<'_, Event> {
         let toolbar = row![
-            button(text("↑").size(14)).on_press(Event::Up).padding(6),
-            button(text("⟳").size(14)).on_press(Event::Refresh).padding(6),
+            button(text("↑").size(14))
+                .style(crate::ui::style::toolbar_button)
+                .on_press(Event::Up)
+                .padding([4, 8]),
+            button(text("⟳").size(14))
+                .style(crate::ui::style::toolbar_button)
+                .on_press(Event::Refresh)
+                .padding([4, 8]),
         ]
         .spacing(4);
 

@@ -67,7 +67,10 @@ pub fn view<'a>(
     });
 
     let tool = |label: &'static str, event: Event| {
-        button(text(label).size(13)).padding(6).on_press(event)
+        button(text(label).size(13))
+            .style(crate::ui::style::toolbar_button)
+            .padding(6)
+            .on_press(event)
     };
 
     let toolbar = row![
@@ -142,7 +145,10 @@ fn view_cell<'a>(
             };
             let gutter = column![
                 text(gutter_label).font(Font::MONOSPACE).size(12),
-                button(text("▶").size(12)).on_press(Event::RunCell(index)),
+                button(text("▶").size(12))
+                    .style(crate::ui::style::toolbar_button)
+                    .padding([2, 8])
+                    .on_press(Event::RunCell(index)),
             ]
             .spacing(4)
             .width(70);

@@ -1121,14 +1121,14 @@ impl App {
                     button(text(title).size(12))
                         .padding([3, 8])
                         .style(if is_active {
-                            button::primary
+                            crate::ui::style::active_tab
                         } else {
-                            button::text
+                            crate::ui::style::inactive_tab
                         })
                         .on_press(Message::SelectTab(pane, i)),
                     button(text("✕").size(11))
                         .padding([3, 4])
-                        .style(button::text)
+                        .style(crate::ui::style::inactive_tab)
                         .on_press(Message::CloseTab(pane, i)),
                 ]
                 .spacing(0),
@@ -1137,13 +1137,13 @@ impl App {
         strip = strip.push(
             button(text("+").size(13))
                 .padding([2, 8])
-                .style(button::text)
+                .style(crate::ui::style::inactive_tab)
                 .on_press(Message::NewLauncher(pane)),
         );
         strip = strip.push(
             button(text("⫲").size(12))
                 .padding([2, 8])
-                .style(button::text)
+                .style(crate::ui::style::inactive_tab)
                 .on_press(Message::SplitPane(pane)),
         );
         strip.into()
