@@ -1072,17 +1072,8 @@ impl App {
                 None => text("").into(),
             };
 
-            let sidebar_toggle = button(
-                text(if self.show_sidebar { "◧" } else { "◨" }).size(13),
-            )
-            .padding([2, 8])
-            .style(crate::ui::style::inactive_tab)
-            .on_press(Message::ToggleSidebar);
-
-            pane_grid::Content::new(body).title_bar(
-                pane_grid::TitleBar::new(tab_strip)
-                    .controls(pane_grid::Controls::new(Element::from(sidebar_toggle))),
-            )
+            pane_grid::Content::new(body)
+                .title_bar(pane_grid::TitleBar::new(tab_strip))
         })
         .spacing(4)
         .on_click(Message::PaneClicked)
@@ -1115,7 +1106,13 @@ impl App {
         pane: pane_grid::Pane,
         state: &'a PaneTabs,
     ) -> Element<'a, Message> {
-        let mut strip = row![].spacing(2);
+        let mut strip = row![
+            button(text(if self.show_sidebar { "◧" } else { "◨" }).size(13))
+                .padding([2, 8])
+                .style(crate::ui::style::inactive_tab)
+                .on_press(Message::ToggleSidebar)
+        ]
+        .spacing(2);
         for (i, id) in state.tabs.iter().enumerate() {
             let title = match self.tabs.get(id) {
                 Some(Tab::Launcher) => "Launcher".to_string(),
