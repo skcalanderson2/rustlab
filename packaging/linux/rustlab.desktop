@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=RustLab
+GenericName=Jupyter Notebook Editor
+Comment=Native Jupyter notebook desktop app
+Exec=rustlab %f
+Icon=rustlab
+Terminal=false
+Categories=Development;Science;IDE;
+MimeType=application/x-ipynb+json;
+Keywords=jupyter;notebook;python;julia;kernel;

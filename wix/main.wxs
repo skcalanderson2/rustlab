@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="windows-1252"?>
+<!--
+  WiX v3 source for the RustLab MSI, built with `cargo wix` (cargo-wix).
+  Layout follows the cargo-wix template: binary path comes in via the
+  CargoTargetBinDir preprocessor variable, version via Version.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+
+    <Product
+        Id="*"
+        Name="RustLab"
+        UpgradeCode="8C1CB6F2-2982-4FEA-B372-0AB0830AEF13"
+        Manufacturer="Al Anderson"
+        Language="1033"
+        Codepage="1252"
+        Version="$(var.Version)">
+
+        <Package
+            Id="*"
+            Keywords="Installer"
+            Description="RustLab — native Jupyter notebook desktop app"
+            Manufacturer="Al Anderson"
+            InstallerVersion="450"
+            Languages="1033"
+            Compressed="yes"
+            InstallScope="perMachine"
+            SummaryCodepage="1252" />
+
+        <MajorUpgrade
+            Schedule="afterInstallInitialize"
+            DowngradeErrorMessage="A newer version of RustLab is already installed. Setup will now exit." />
+
+        <Media Id="1" Cabinet="media1.cab" EmbedCab="yes" DiskPrompt="CD-ROM #1" />
+        <Property Id="DiskPrompt" Value="RustLab Installation" />
+
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="ProgramFiles64Folder" Name="PFiles">
+                <Directory Id="APPLICATIONFOLDER" Name="RustLab">
+                    <Component Id="RustLabExe" Guid="C16BB5BC-270B-4E04-A6CC-86A4E6FC4AC6" Win64="yes">
+                        <File
+                            Id="RustLabExeFile"
+                            Name="rustlab.exe"
+                            DiskId="1"
+                            Source="$(var.CargoTargetBinDir)\rustlab.exe"
+                            KeyPath="yes" />
+                    </Component>
+                </Directory>
+            </Directory>
+
+            <Directory Id="ProgramMenuFolder" Name="Programs">
+                <Directory Id="ApplicationProgramsFolder" Name="RustLab">
+                    <Component Id="StartMenuShortcut" Guid="*">
+                        <Shortcut
+                            Id="RustLabStartMenuShortcut"
+                            Name="RustLab"
+                            Description="Native Jupyter notebook desktop app"
+                            Target="[APPLICATIONFOLDER]rustlab.exe"
+                            WorkingDirectory="APPLICATIONFOLDER"
+                            Icon="ProductICO" />
+                        <RemoveFolder Id="CleanUpShortcut" Directory="ApplicationProgramsFolder" On="uninstall" />
+                        <RegistryValue
+                            Root="HKCU"
+                            Key="Software\RustLab"
+                            Name="installed"
+                            Type="integer"
+                            Value="1"
+                            KeyPath="yes" />
+                    </Component>
+                </Directory>
+            </Directory>
+        </Directory>
+
+        <Feature
+            Id="MainProgram"
+            Title="RustLab"
+            Description="Installs the RustLab application."
+            Level="1"
+            ConfigurableDirectory="APPLICATIONFOLDER"
+            AllowAdvertise="no"
+            Display="expand"
+            Absent="disallow">
+            <ComponentRef Id="RustLabExe" />
+            <ComponentRef Id="StartMenuShortcut" />
+        </Feature>
+
+        <SetProperty Id="ARPINSTALLLOCATION" Value="[APPLICATIONFOLDER]" After="CostFinalize" />
+
+        <Icon Id="ProductICO" SourceFile="packaging\windows\RustLab.ico" />
+        <Property Id="ARPPRODUCTICON" Value="ProductICO" />
+        <Property Id="ARPHELPLINK" Value="https://github.com/skcalanderson2/rustlab" />
+
+        <UI>
+            <UIRef Id="WixUI_InstallDir" />
+        </UI>
+        <Property Id="WIXUI_INSTALLDIR" Value="APPLICATIONFOLDER" />
+        <WixVariable Id="WixUILicenseRtf" Value="wix\License.rtf" />
+
+    </Product>
+
+</Wix>

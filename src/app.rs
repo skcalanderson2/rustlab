@@ -363,8 +363,7 @@ impl App {
                 let id = self.next_tab_id;
                 let settings = iced_term::settings::Settings {
                     backend: iced_term::settings::BackendSettings {
-                        program: std::env::var("SHELL")
-                            .unwrap_or_else(|_| "/bin/zsh".to_string()),
+                        program: default_shell(),
                         working_directory: Some(self.browser.cwd.clone()),
                         ..Default::default()
                     },
@@ -1358,6 +1357,30 @@ impl ConsoleTab {
                 }
             }
         }
+    }
+}
+
+/// Platform-appropriate shell for terminal tabs. iced_term's own default is
+/// `wsl.exe` on Windows, which is frequently not installed.
+fn default_shell() -> String {
+    #[cfg(windows)]
+    {
+        // Prefer PowerShell 7 when present, fall back to Windows PowerShell
+        // (present on every supported Windows).
+        let on_path = |exe: &str| {
+            std::env::var_os("PATH").is_some_and(|paths| {
+                std::env::split_paths(&paths).any(|dir| dir.join(exe).is_file())
+            })
+        };
+        if on_path("pwsh.exe") {
+            "pwsh.exe".to_string()
+        } else {
+            "powershell.exe".to_string()
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
     }
 }
 

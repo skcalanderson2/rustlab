@@ -52,7 +52,26 @@ syntax-highlighted code, and live kernel execution:
   ```
 
 No libzmq, no Jupyter server, no Python requirement for the app itself —
-the ZeroMQ implementation is pure Rust.
+the entire dependency tree is pure Rust (no C libraries), which is also why
+it builds cleanly on macOS, Windows, and Linux with nothing beyond a Rust
+toolchain (plus `build-essential`/MSVC Build Tools for the linker).
+
+### Platform notes
+
+- **macOS** 11+: signed + notarized DMG on the
+  [releases page](https://github.com/skcalanderson2/rustlab/releases).
+- **Windows** 10 1809+ (ConPTY needed for terminal tabs): MSI installer or
+  portable zip. The installer is currently **unsigned** — SmartScreen shows
+  "Windows protected your PC" on first run; click *More info → Run anyway*.
+  Terminal tabs open PowerShell (`pwsh.exe` if installed, else
+  `powershell.exe`).
+- **Linux**: `.deb` (Ubuntu 22.04+/Debian 12+) or AppImage. File dialogs use
+  the XDG desktop portal (present on all mainstream desktops). Color emoji
+  in the UI need a CBDT emoji font — `fonts-noto-color-emoji` on
+  Debian/Ubuntu (a Recommends of the .deb); Fedora's COLRv1-only Noto
+  renders those glyphs blank (known cosmic-text limitation). AppImages need
+  FUSE2 (`libfuse2t64` on Ubuntu 24.04) or run with
+  `--appimage-extract-and-run`.
 
 ## Build & Run
 
@@ -97,6 +116,33 @@ NOTARY_PROFILE=rustlab-notary ./packaging/macos/notarize.sh
 
 See [`packaging/macos/`](packaging/macos/) for the scripts, `Info.plist`,
 and entitlements.
+
+## Windows installer
+
+On a Windows machine with Rust (MSVC) and
+[WiX v3.14](https://github.com/wixtoolset/wix3/releases) installed:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
+```
+
+Produces `dist\rustlab-<version>-x86_64.msi` (cargo-wix; Start Menu
+shortcut, Add/Remove Programs entry) and a portable
+`dist\RustLab-<version>-windows-x86_64.zip`.
+
+## Linux packages
+
+On a Linux machine with Rust and `build-essential` (build on the oldest
+distro you want to support — the binary requires that machine's glibc or
+newer):
+
+```sh
+./packaging/linux/build-packages.sh
+```
+
+Produces `dist/rustlab_<version>_amd64.deb` (cargo-deb; desktop entry +
+icons included) and `dist/RustLab-<version>-x86_64.AppImage` (linuxdeploy,
+downloaded automatically on first run).
 
 ## Architecture
 
