@@ -8,6 +8,7 @@ use iced::widget::{markdown, text_editor};
 use jupyter_protocol::{ExecutionCount, Media};
 use nbformat::v4;
 
+use crate::output::ansi::{self, AnsiSpan};
 use crate::output::render::{self, Rendered};
 
 pub struct NotebookDoc {
@@ -38,11 +39,13 @@ pub struct CellState {
 }
 
 /// A cell output, unified across live kernel messages and saved notebooks.
+/// ANSI spans are parsed once here, at insert/load time — never in `view()`.
 #[derive(Debug)]
 pub enum CellOutput {
     Stream {
         name: String,
         text: String,
+        spans: Vec<AnsiSpan>,
     },
     /// display_data, or execute_result when `execution_count` is set.
     Data {
@@ -54,7 +57,34 @@ pub enum CellOutput {
         ename: String,
         evalue: String,
         traceback: Vec<String>,
+        /// Parsed spans, one entry per traceback line (or one synthesized
+        /// `ename: evalue` line when the traceback is empty).
+        spans: Vec<Vec<AnsiSpan>>,
     },
+}
+
+impl CellOutput {
+    pub fn stream(name: &str, text: String) -> Self {
+        CellOutput::Stream {
+            name: name.to_string(),
+            spans: ansi::parse(&text),
+            text,
+        }
+    }
+
+    pub fn error(ename: String, evalue: String, traceback: Vec<String>) -> Self {
+        let spans = if traceback.is_empty() {
+            vec![ansi::parse(&format!("{ename}: {evalue}"))]
+        } else {
+            traceback.iter().map(|line| ansi::parse(line)).collect()
+        };
+        CellOutput::Error {
+            ename,
+            evalue,
+            traceback,
+            spans,
+        }
+    }
 }
 
 impl CellState {
@@ -69,15 +99,16 @@ impl CellState {
     /// Append a stream chunk, merging with a trailing stream output of the
     /// same name the way JupyterLab does.
     pub fn push_stream(&mut self, name: &str, chunk: &str) {
-        if let Some(CellOutput::Stream { name: last, text }) = self.outputs.last_mut()
-            && last == name {
-                text.push_str(chunk);
-                return;
-            }
-        self.outputs.push(CellOutput::Stream {
-            name: name.to_string(),
-            text: chunk.to_string(),
-        });
+        if let Some(CellOutput::Stream { name: last, text, spans }) = self.outputs.last_mut()
+            && last == name
+        {
+            text.push_str(chunk);
+            // Re-parse the whole text: a chunk may continue an escape
+            // sequence or style from the previous chunk.
+            *spans = ansi::parse(text);
+            return;
+        }
+        self.outputs.push(CellOutput::stream(name, chunk.to_string()));
     }
 }
 
@@ -193,7 +224,7 @@ fn cell_to_nbformat(cell: &CellState) -> v4::Cell {
 
 fn output_from_nbformat(output: v4::Output) -> CellOutput {
     match output {
-        v4::Output::Stream { name, text } => CellOutput::Stream { name, text: text.0 },
+        v4::Output::Stream { name, text } => CellOutput::stream(&name, text.0),
         v4::Output::DisplayData(d) => CellOutput::Data {
             rendered: render::prepare(&d.data),
             media: d.data,
@@ -204,17 +235,13 @@ fn output_from_nbformat(output: v4::Output) -> CellOutput {
             media: r.data,
             execution_count: Some(r.execution_count),
         },
-        v4::Output::Error(e) => CellOutput::Error {
-            ename: e.ename,
-            evalue: e.evalue,
-            traceback: e.traceback,
-        },
+        v4::Output::Error(e) => CellOutput::error(e.ename, e.evalue, e.traceback),
     }
 }
 
 fn output_to_nbformat(output: &CellOutput) -> v4::Output {
     match output {
-        CellOutput::Stream { name, text } => v4::Output::Stream {
+        CellOutput::Stream { name, text, .. } => v4::Output::Stream {
             name: name.clone(),
             text: v4::MultilineString(text.clone()),
         },
@@ -239,6 +266,7 @@ fn output_to_nbformat(output: &CellOutput) -> v4::Output {
             ename,
             evalue,
             traceback,
+            ..
         } => v4::Output::Error(v4::ErrorOutput {
             ename: ename.clone(),
             evalue: evalue.clone(),

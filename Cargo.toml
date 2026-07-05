@@ -3,6 +3,17 @@ name = "rustlab"
 version = "0.1.0"
 edition = "2024"
 
+# The GUI stack (wgpu, cosmic-text, syntect) is unusably slow unoptimized;
+# keep our code fast to compile but optimize all dependencies.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+
 [dependencies]
 iced = { version = "0.14", features = ["tokio", "highlighter", "markdown", "image", "svg", "canvas", "advanced", "lazy"] }
 jupyter-zmq-client = { version = "1.0", features = ["tokio-runtime"] }

@@ -1234,11 +1234,8 @@ impl NotebookTab {
                 });
             }
             JupyterMessageContent::ErrorOutput(e) => {
-                cell.outputs.push(CellOutput::Error {
-                    ename: e.ename,
-                    evalue: e.evalue,
-                    traceback: e.traceback,
-                });
+                cell.outputs
+                    .push(CellOutput::error(e.ename, e.evalue, e.traceback));
             }
             _ => {}
         }
@@ -1306,16 +1303,15 @@ impl ConsoleTab {
                             jupyter_protocol::Stdio::Stdout => "stdout",
                             jupyter_protocol::Stdio::Stderr => "stderr",
                         };
-                        if let Some(CellOutput::Stream { name: last, text }) =
+                        if let Some(CellOutput::Stream { name: last, text, spans }) =
                             entry.outputs.last_mut()
-                            && last == name {
-                                text.push_str(&s.text);
-                                return;
-                            }
-                        entry.outputs.push(CellOutput::Stream {
-                            name: name.to_string(),
-                            text: s.text,
-                        });
+                            && last == name
+                        {
+                            text.push_str(&s.text);
+                            *spans = crate::output::ansi::parse(text);
+                            return;
+                        }
+                        entry.outputs.push(CellOutput::stream(name, s.text));
                     }
                     JupyterMessageContent::ExecuteInput(input) => {
                         entry.execution_count = Some(input.execution_count.value() as i32);
@@ -1335,11 +1331,9 @@ impl ConsoleTab {
                         });
                     }
                     JupyterMessageContent::ErrorOutput(e) => {
-                        entry.outputs.push(CellOutput::Error {
-                            ename: e.ename,
-                            evalue: e.evalue,
-                            traceback: e.traceback,
-                        });
+                        entry
+                            .outputs
+                            .push(CellOutput::error(e.ename, e.evalue, e.traceback));
                     }
                     _ => {}
                 }

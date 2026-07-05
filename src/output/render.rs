@@ -2,23 +2,22 @@
 
 use base64::Engine;
 use iced::widget::{column, image, markdown, rich_text, span, svg, text};
-use iced::{Color, Element, Font};
+use iced::{Element, Font};
 use jupyter_protocol::{Media, MediaType};
 
 use crate::notebook::model::CellOutput;
-use crate::output::ansi;
+use crate::output::ansi::{self, AnsiSpan};
 
-const ERROR_RED: Color = Color::from_rgb(0.86, 0.36, 0.34);
 const OUTPUT_TEXT_SIZE: f32 = 13.0;
 
 /// A mime bundle converted once, at insert/load time, into something the view
-/// can render every frame without re-decoding.
+/// can render every frame without re-decoding or re-parsing.
 #[derive(Debug)]
 pub enum Rendered {
     Image(image::Handle),
     Svg(svg::Handle),
     Markdown(markdown::Content),
-    Text(String),
+    Ansi(Vec<AnsiSpan>),
     Unsupported(&'static str),
 }
 
@@ -46,8 +45,8 @@ pub fn prepare(media: &Media) -> Rendered {
             Rendered::Svg(svg::Handle::from_memory(markup.clone().into_bytes()))
         }
         Some(MediaType::Markdown(md)) => Rendered::Markdown(markdown::Content::parse(md)),
-        Some(MediaType::Latex(tex)) => Rendered::Text(tex.clone()),
-        Some(MediaType::Plain(s)) => Rendered::Text(s.clone()),
+        Some(MediaType::Latex(tex)) => Rendered::Ansi(ansi::parse(tex)),
+        Some(MediaType::Plain(s)) => Rendered::Ansi(ansi::parse(s)),
         Some(_) => Rendered::Unsupported("output"),
         None => Rendered::Unsupported("output"),
     }
@@ -60,18 +59,10 @@ fn decode_base64(data: &str) -> Option<Vec<u8>> {
 
 pub fn view_output<'a>(output: &'a CellOutput, dark: bool) -> Element<'a, markdown::Uri> {
     match output {
-        CellOutput::Stream { text, .. } => ansi_text(text),
+        CellOutput::Stream { spans, .. } => ansi_text(spans),
         CellOutput::Data { rendered, .. } => view_rendered(rendered, dark),
-        CellOutput::Error {
-            traceback,
-            ename,
-            evalue,
-        } => {
-            if traceback.is_empty() {
-                ansi_text_colored(&format!("{ename}: {evalue}"), Some(ERROR_RED))
-            } else {
-                column(traceback.iter().map(|line| ansi_text(line))).into()
-            }
+        CellOutput::Error { spans, .. } => {
+            column(spans.iter().map(|line| ansi_text(line))).into()
         }
     }
 }
@@ -90,7 +81,7 @@ fn view_rendered<'a>(rendered: &'a Rendered, dark: bool) -> Element<'a, markdown
                 if dark { iced::Theme::Dark } else { iced::Theme::Light },
             ),
         ),
-        Rendered::Text(s) => ansi_text(s),
+        Rendered::Ansi(spans) => ansi_text(spans),
         Rendered::Unsupported(kind) => text(format!("<unsupported {kind}>"))
             .font(Font::MONOSPACE)
             .size(OUTPUT_TEXT_SIZE)
@@ -98,19 +89,16 @@ fn view_rendered<'a>(rendered: &'a Rendered, dark: bool) -> Element<'a, markdown
     }
 }
 
-fn ansi_text<'a, Message: 'a + Clone>(content: &str) -> Element<'a, Message> {
-    ansi_text_colored(content, None)
-}
-
-fn ansi_text_colored<'a, Message: 'a + Clone>(
-    content: &str,
-    default_color: Option<Color>,
-) -> Element<'a, Message> {
-    let spans: Vec<iced::widget::text::Span<'static, ()>> = ansi::parse(content)
-        .into_iter()
+/// Turn pre-parsed ANSI spans into a rich_text element. Borrows the span
+/// text — no per-frame parsing or string cloning.
+fn ansi_text<'a, Message: 'a + Clone>(spans: &'a [AnsiSpan]) -> Element<'a, Message> {
+    let spans: Vec<iced::widget::text::Span<'a, ()>> = spans
+        .iter()
         .map(|s| {
-            let mut sp = span(s.text).font(Font::MONOSPACE).size(OUTPUT_TEXT_SIZE);
-            if let Some(color) = s.color.or(default_color) {
+            let mut sp = span(s.text.as_str())
+                .font(Font::MONOSPACE)
+                .size(OUTPUT_TEXT_SIZE);
+            if let Some(color) = s.color {
                 sp = sp.color(color);
             }
             sp
