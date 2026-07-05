@@ -128,6 +128,7 @@ pub enum Message {
     SaveActive,
     SavePathChosen(TabId, Option<PathBuf>),
     Saved(TabId, Result<(), String>),
+    ToggleSidebar,
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +238,10 @@ impl App {
             }
             Message::FileChosen(Some(path)) => self.open_notebook(path),
             Message::FileChosen(None) => Task::none(),
+            Message::ToggleSidebar => {
+                self.show_sidebar = !self.show_sidebar;
+                Task::none()
+            }
             Message::Terminal(iced_term::Event::BackendCall(term_id, cmd)) => {
                 let entry = self.tabs.iter_mut().find_map(|(tab_id, tab)| match tab {
                     Tab::Terminal(term) if term.id == term_id => Some((*tab_id, term)),
@@ -1067,8 +1072,17 @@ impl App {
                 None => text("").into(),
             };
 
-            pane_grid::Content::new(body)
-                .title_bar(pane_grid::TitleBar::new(tab_strip))
+            let sidebar_toggle = button(
+                text(if self.show_sidebar { "◧" } else { "◨" }).size(13),
+            )
+            .padding([2, 8])
+            .style(crate::ui::style::inactive_tab)
+            .on_press(Message::ToggleSidebar);
+
+            pane_grid::Content::new(body).title_bar(
+                pane_grid::TitleBar::new(tab_strip)
+                    .controls(pane_grid::Controls::new(Element::from(sidebar_toggle))),
+            )
         })
         .spacing(4)
         .on_click(Message::PaneClicked)
