@@ -44,12 +44,17 @@ echo "==> Using $ENGINE with ubuntu:22.04 (glibc 2.35 floor)"
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
 
-# Named volume caches the toolchain + crate downloads between runs.
+# Named volumes cache the toolchain + crate downloads between runs.
+# Both are needed: ~/.cargo holds the cargo/rustc proxy shims and crate
+# cache, ~/.rustup holds the actual toolchain and the default setting —
+# caching only the first leaves broken shims with no toolchain behind them.
 $ENGINE run --rm \
     -v "$ROOT:/work" \
     -v rustlab-build-cache:/root/.cargo \
+    -v rustlab-rustup-cache:/root/.rustup \
     -e HOST_UID="$HOST_UID" \
     -e HOST_GID="$HOST_GID" \
+    -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-}" \
     -w /work \
     ubuntu:22.04 \
     bash -c '
@@ -59,11 +64,13 @@ $ENGINE run --rm \
         apt-get update -qq
         apt-get install -y -qq build-essential pkg-config curl file ca-certificates git >/dev/null
 
-        if ! command -v cargo >/dev/null 2>&1 && [ ! -x /root/.cargo/bin/cargo ]; then
-            echo "==> [container] Installing Rust (cached in a volume for next time)"
+        export PATH="/root/.cargo/bin:$PATH"
+        # Real check: does cargo actually run (shim + toolchain both present)?
+        if ! cargo --version >/dev/null 2>&1; then
+            echo "==> [container] Installing Rust (cached in volumes for next time)"
             curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y -q
         fi
-        export PATH="/root/.cargo/bin:$PATH"
+        [ -n "${CARGO_BUILD_JOBS:-}" ] || unset CARGO_BUILD_JOBS
 
         echo "==> [container] Building packages"
         ./packaging/linux/build-packages.sh
